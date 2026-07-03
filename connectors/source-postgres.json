@@ -1,0 +1,22 @@
+{
+  "name": "src-customers",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "pg-source",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "postgres",
+    "database.dbname": "sourcedb",
+    "topic.prefix": "dbz",
+    "table.include.list": "inventory.customers",
+    "plugin.name": "pgoutput",
+    "slot.name": "dbz_slot",
+    "publication.name": "dbz_pub",
+    "publication.autocreate.mode": "filtered",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "true",
+    "value.converter.schemas.enable": "true"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "sink-customers",
+  "config": {
+    "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    "topics.regex": "(gebze\\.)?dbz\\.inventory\\.customers",
+    "connection.url": "jdbc:postgresql://pg-target-b:5432/targetdb",
+    "connection.username": "postgres",
+    "connection.password": "postgres",
+    "insert.mode": "upsert",
+    "primary.key.mode": "record_key",
+    "primary.key.fields": "id",
+    "delete.enabled": "true",
+    "schema.evolution": "basic",
+    "table.name.format": "customers_replica",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "true",
+    "value.converter.schemas.enable": "true"
+  }
+}
