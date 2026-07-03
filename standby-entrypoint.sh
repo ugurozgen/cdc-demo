@@ -1,14 +1,14 @@
 #!/bin/bash
-# pg-source-b (PG17 STANDBY) entrypoint.
-# PGDATA boşsa: pg-source'tan pg_basebackup ile fiziksel replica kur, sonra
+# pg-source-ankara (PG17 STANDBY) entrypoint.
+# PGDATA boşsa: pg-source-gebze'tan pg_basebackup ile fiziksel replica kur, sonra
 # PG17 slot sync ayarlarını yaz. Doluysa: normal başlat (promote sonrası dahil).
 set -e
 
 PGDATA="${PGDATA:-/var/lib/postgresql/data}"
-PRIMARY_HOST="${PRIMARY_HOST:-pg-source}"
+PRIMARY_HOST="${PRIMARY_HOST:-pg-source-gebze}"
 
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
-  echo "[standby] PGDATA boş — pg-source bekleniyor..."
+  echo "[standby] PGDATA boş — pg-source-gebze bekleniyor..."
   until pg_isready -h "$PRIMARY_HOST" -p 5432 -U replicator -d sourcedb -q; do
     echo "[standby] primary hazır değil, 2sn..."; sleep 2
   done

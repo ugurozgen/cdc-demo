@@ -4,7 +4,7 @@
     "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
     "tasks.max": "1",
     "topics.regex": "(gebze\\.)?dbz\\.inventory\\.customers",
-    "connection.url": "jdbc:postgresql://pg-target-b:5432/targetdb",
+    "connection.url": "jdbc:postgresql://pg-target-ankara:5432/targetdb",
     "connection.username": "postgres",
     "connection.password": "postgres",
     "insert.mode": "upsert",

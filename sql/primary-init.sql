@@ -1,4 +1,4 @@
--- pg-source (PG17 PRIMARY) bootstrap
+-- pg-source-gebze (PG17 PRIMARY) bootstrap
 -- Streaming replication + Debezium failover slot için hazırlık.
 
 -- Replication kullanıcısı (standby pg_basebackup ile bağlanır)

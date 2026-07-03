@@ -1,17 +1,17 @@
 # MM2 lab — yardımcı komutlar
 # Kullanım: make up / make demo / make verify / make down
 
-A := docker compose exec -T kafka-a /opt/kafka/bin
-B := docker compose exec -T kafka-b /opt/kafka/bin
+A := docker compose exec -T kafka-gebze /opt/kafka/bin
+B := docker compose exec -T kafka-ankara /opt/kafka/bin
 BS_A := --bootstrap-server localhost:19092
 BS_B := --bootstrap-server localhost:19092
 # Container-içi CLI INTERNAL listener'a (localhost:19092) bağlanır; HOST listener
 # (9092/9094) advertised adresi container dışına işaret ettiği için içeriden kullanılmaz.
 
-PSQL_S := docker compose exec -T pg-source psql -U postgres -d sourcedb
-PSQL_T := docker compose exec -T pg-target psql -U postgres -d targetdb
-PSQL_SB := docker compose exec -T pg-source-b psql -U postgres -d sourcedb
-PSQL_TB := docker compose exec -T pg-target-b psql -U postgres -d targetdb
+PSQL_S := docker compose exec -T pg-source-gebze psql -U postgres -d sourcedb
+PSQL_T := docker compose exec -T pg-target-gebze psql -U postgres -d targetdb
+PSQL_SB := docker compose exec -T pg-source-ankara psql -U postgres -d sourcedb
+PSQL_TB := docker compose exec -T pg-target-ankara psql -U postgres -d targetdb
 CONNECT_A := http://localhost:8084
 CONNECT_B := http://localhost:8085
 CONNECT := $(CONNECT_A)
@@ -93,10 +93,10 @@ cdc-status:        ## gebze Connect connector durumları
 	@curl -sf $(CONNECT_A)/connectors?expand=status | python3 -m json.tool
 
 cdc-test:          ## Kaynağa yeni satır ekle, hedef tabloda + mirror topic'te doğrula
-	@echo ">> pg-source'a INSERT"
+	@echo ">> pg-source-gebze'a INSERT"
 	@$(PSQL_S) -c "INSERT INTO inventory.customers(name,email) VALUES ('Grace Hopper','grace@example.com');"
 	@echo ">> CDC akışı için 6sn bekle"; sleep 6
-	@echo "==== HEDEF (pg-target.customers_replica) ===="
+	@echo "==== HEDEF (pg-target-gebze.customers_replica) ===="
 	@$(PSQL_T) -c "SELECT id,name,email FROM customers_replica ORDER BY id;" || echo "(tablo henüz yok? sink durumunu kontrol et: make cdc-status)"
 	@echo "==== ankara'da mirror edilen CDC topic'i (gebze.dbz.inventory.customers) ===="
 	@$(B)/kafka-topics.sh $(BS_B) --list | grep dbz || echo "(mirror için ~10sn daha bekle)"
@@ -114,19 +114,19 @@ failover-check:    ## Sink consumer group offset'i iki cluster'da karşılaştı
 	@$(B)/kafka-consumer-groups.sh $(BS_B) --describe --group connect-sink-customers 2>/dev/null | grep -E 'TOPIC|dbz' || echo "(grup ankara'ya sync olmamış - mm2.properties groups.exclude kontrol et)"
 
 # --- Phase 3/4: failover (gebze->ankara) ve failback (ankara->gebze) ---
-# failover GERÇEK DB promote yapar: standby (pg-source-b) yazılabilir primary olur,
+# failover GERÇEK DB promote yapar: standby (pg-source-ankara) yazılabilir primary olur,
 # ankara Debezium senkron dbz_slot'tan (snapshot.mode=never) kaldığı LSN'den devam eder.
 failover:          ## gebze DÜŞTÜ: gebze PAUSE -> standby PROMOTE -> ankara source+sink başlar, yük ankara'ya
 	@echo ">> [gebze] connector'lar PAUSE"
 	@curl -sf -X PUT $(CONNECT_A)/connectors/src-customers/pause  || true
 	@curl -sf -X PUT $(CONNECT_A)/connectors/sink-customers/pause || true
-	@echo ">> [DB] standby (pg-source-b) PROMOTE ediliyor"
+	@echo ">> [DB] standby (pg-source-ankara) PROMOTE ediliyor"
 	@$(PSQL_SB) -c "SELECT pg_promote(wait => true);" || true
 	@echo ">> promote sonrası dbz_slot durumu (synced->normal, active olacak):"
 	@$(PSQL_SB) -c "SELECT slot_name,synced,failover,active FROM pg_replication_slots;" || true
 	@echo ">> yük üreteci ankara'ya (artık yazılabilir)"
-	@docker compose stop loadgen-a >/dev/null 2>&1 || true
-	@docker compose --profile failover up -d loadgen-b
+	@docker compose stop loadgen-gebze >/dev/null 2>&1 || true
+	@docker compose --profile failover up -d loadgen-ankara
 	@echo ">> [ankara] sink RESUME + source KAYDET (snapshot.mode=never -> slot'tan devam)"
 	@curl -sf -X PUT $(CONNECT_B)/connectors/sink-customers/resume || true
 	@curl -sf -X POST -H "Content-Type: application/json" --data @connectors/source-postgres-ankara.json $(CONNECT_B)/connectors >/dev/null || true
@@ -136,34 +136,34 @@ failback:          ## gebze GERİ GELDİ: ankara PAUSE, gebze RESUME, yük gebze
 	@echo ">> [ankara] connector'lar PAUSE + ankara source siliniyor"
 	@curl -sf -X PUT $(CONNECT_B)/connectors/sink-customers/pause || true
 	@curl -sf -X DELETE $(CONNECT_B)/connectors/src-customers >/dev/null 2>&1 || true
-	@docker compose stop loadgen-b >/dev/null 2>&1 || true
+	@docker compose stop loadgen-ankara >/dev/null 2>&1 || true
 	@echo ">> [gebze] connector'lar RESUME, yük gebze'ye"
-	@docker compose up -d loadgen-a
+	@docker compose up -d loadgen-gebze
 	@curl -sf -X PUT $(CONNECT_A)/connectors/sink-customers/resume || true
 	@curl -sf -X PUT $(CONNECT_A)/connectors/src-customers/resume  || true
 	@echo ""
-	@echo ">> NOT: failover'da pg-source-b promote edildiyse iki taraf ayrıştı (split timeline)."
+	@echo ">> NOT: failover'da pg-source-ankara promote edildiyse iki taraf ayrıştı (split timeline)."
 	@echo ">>      DB'yi yeniden senkronlamak için (Patroni'nin otomatik yaptığı pg_rewind):"
-	@echo ">>      make db-reprovision  (pg-source-b'yi sıfırdan standby olarak yeniden kurar)"
+	@echo ">>      make db-reprovision  (pg-source-ankara'yi sıfırdan standby olarak yeniden kurar)"
 
 db-status:         ## Streaming replication + slot sync durumu (primary & standby)
-	@echo "==== pg-source (primary) — replication clients & slots ===="
+	@echo "==== pg-source-gebze (primary) — replication clients & slots ===="
 	@$(PSQL_S) -c "SELECT application_name,state,sync_state,replay_lag FROM pg_stat_replication;" 2>/dev/null || echo "(primary değil?)"
 	@$(PSQL_S) -c "SELECT slot_name,slot_type,active,failover FROM pg_replication_slots;" 2>/dev/null || true
-	@echo "==== pg-source-b (standby) — recovery & synced slots ===="
+	@echo "==== pg-source-ankara (standby) — recovery & synced slots ===="
 	@$(PSQL_SB) -c "SELECT pg_is_in_recovery() AS in_recovery;" 2>/dev/null || true
 	@$(PSQL_SB) -c "SELECT slot_name,slot_type,synced,active,failover FROM pg_replication_slots;" 2>/dev/null || true
 	@echo "==== veri eşitliği (primary vs standby satır sayısı) ===="
 	@echo "  primary=$$($(PSQL_S) -tAc 'SELECT count(*) FROM inventory.customers' 2>/dev/null || echo -)  standby=$$($(PSQL_SB) -tAc 'SELECT count(*) FROM inventory.customers' 2>/dev/null || echo -)"
 
-db-reprovision:    ## pg-source-b'yi sıfırdan standby olarak yeniden kur (failback sonrası DB re-sync)
-	@echo ">> ankara connector'ları + loadgen-b durduruluyor"
+db-reprovision:    ## pg-source-ankara'yi sıfırdan standby olarak yeniden kur (failback sonrası DB re-sync)
+	@echo ">> ankara connector'ları + loadgen-ankara durduruluyor"
 	@curl -sf -X DELETE $(CONNECT_B)/connectors/src-customers  >/dev/null 2>&1 || true
 	@curl -sf -X PUT    $(CONNECT_B)/connectors/sink-customers/pause >/dev/null 2>&1 || true
-	@docker compose stop loadgen-b >/dev/null 2>&1 || true
-	@echo ">> pg-source-b siliniyor ve standby olarak yeniden kuruluyor (pg_basebackup)"
-	@docker compose rm -v -sf pg-source-b >/dev/null 2>&1 || true
-	@docker compose up -d pg-source-b
+	@docker compose stop loadgen-ankara >/dev/null 2>&1 || true
+	@echo ">> pg-source-ankara siliniyor ve standby olarak yeniden kuruluyor (pg_basebackup)"
+	@docker compose rm -v -sf pg-source-ankara >/dev/null 2>&1 || true
+	@docker compose up -d pg-source-ankara
 	@echo ">> 'make db-status' ile standby tekrar senkron mu kontrol et."
 
 active-status:     ## İki tarafın connector durumu + hangi loadgen çalışıyor
@@ -175,18 +175,18 @@ active-status:     ## İki tarafın connector durumu + hangi loadgen çalışıy
 	@docker compose ps --status running --format '{{.Service}}' | grep loadgen || echo "  (çalışan loadgen yok)"
 
 cdc-watch:         ## İki hedef tablonun satır sayısını canlı izle (Ctrl+C ile çık)
-	@echo "gebze pg-target vs ankara pg-target-b — satır sayıları (2sn'de bir)"
+	@echo "gebze pg-target-gebze vs ankara pg-target-ankara — satır sayıları (2sn'de bir)"
 	@while true; do \
 		g=$$($(PSQL_T) -tAc "SELECT count(*) FROM customers_replica" 2>/dev/null || echo "-"); \
 		a=$$($(PSQL_TB) -tAc "SELECT count(*) FROM customers_replica" 2>/dev/null || echo "-"); \
 		echo "$$(date +%H:%M:%S)  gebze=$$g  ankara=$$a"; sleep 2; \
 	done
 
-psql-source:       ## pg-source'a interaktif psql
-	docker compose exec pg-source psql -U postgres -d sourcedb
+psql-source:       ## pg-source-gebze'a interaktif psql
+	docker compose exec pg-source-gebze psql -U postgres -d sourcedb
 
-psql-target:       ## pg-target'a interaktif psql
-	docker compose exec pg-target psql -U postgres -d targetdb
+psql-target:       ## pg-target-gebze'a interaktif psql
+	docker compose exec pg-target-gebze psql -U postgres -d targetdb
 
 help:              ## Bu yardım
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
