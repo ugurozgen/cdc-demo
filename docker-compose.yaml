@@ -49,8 +49,10 @@ services:
   kafka-ankara:
     # kafka-gebze ile birebir aynı yapı (env açıklamaları için yukarıya bak); farklar:
     # CLUSTER_ID, quorum voter hostu (kafka-ankara) ve HOST advertised portu (9094).
+    # 3. ADIM (sync): Ankara Kafka 'make sync-start' ile kalkar.
     <<: *kafka-common
     container_name: kafka-ankara
+    profiles: ["sync"]
     ports:
       - "9094:9092"
     environment:
@@ -73,6 +75,10 @@ services:
     image: apache/kafka:3.9.1
     container_name: mm2-ankara
     mem_limit: 768m
+    # 2 ADIMLI DEMO: MM2 varsayılan 'make up' ile başlamaz. Önce gebze'de CDC lokal
+    # çalıştırılır, sonra 'make sync-start' (docker compose --profile sync up -d mm2)
+    # ile cross-DC replikasyon açılır.
+    profiles: ["sync"]
     environment:
       KAFKA_HEAP_OPTS: "-Xmx384m -Xms128m"
     depends_on:
@@ -102,8 +108,10 @@ services:
       - "max_replication_slots=10"
       - "-c"
       - "hot_standby=on"
-      - "-c"
-      - "synchronized_standby_slots=standby_phys_slot"
+      # NOT: synchronized_standby_slots BAŞLANGIÇTA AÇIK DEĞİL. Açık olsaydı Debezium logical
+      # slot'u (dbz_slot), fiziksel standby (Ankara) aktif olana dek BLOKE olur -> Adım 1'de
+      # gebze CDC hiç akmaz. Bu yüzden 3-adımlı akışta 'make standby-up' (Adım 2) standby'ı
+      # kaldırdıktan sonra bu ayarı ALTER SYSTEM ile devreye alır.
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -176,6 +184,10 @@ services:
     image: postgres:17
     container_name: pg-source-ankara
     mem_limit: 512m
+    # 2. ADIM (standby): 'make standby-up' ile kalkar; pg-source-gebze'un streaming
+    # standby'ı olur ve failover slot'unu (dbz_slot) senkron alır -> 'make lsn' ile kanıt.
+    # 'sync' profilinde de var ki 'make sync-start' tek başına da ayağa kaldırabilsin.
+    profiles: ["standby", "sync"]
     depends_on:
       pg-source-gebze:
         condition: service_healthy
@@ -198,6 +210,7 @@ services:
     image: postgres:16
     container_name: pg-target-ankara
     mem_limit: 512m
+    profiles: ["sync"]   # 3. ADIM: ankara sink hedefi, 'make sync-start' ile kalkar
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -214,6 +227,7 @@ services:
     image: quay.io/debezium/connect:3.0.0.Final
     container_name: debezium-ankara
     mem_limit: 1g
+    profiles: ["sync"]   # 3. ADIM: ankara Connect, 'make sync-start' ile kalkar
     depends_on:
       kafka-ankara:
         condition: service_healthy
@@ -286,3 +300,49 @@ services:
             || echo "insert bekliyor ($$TARGET_HOST hazır değil?)"
           sleep 1
         done
+
+  # ---------- Gözlem UI'ları (make up ile başlar — 1. adımdan sonra tarayıcıdan izle) ----------
+  # Kafka UI  : http://localhost:8080  — gebze + ankara cluster'ları TEK arayüzde (topic/mesaj/Connect)
+  # Adminer   : http://localhost:8090  — 4 Postgres'e de bağlanır (login'de sunucu seç)
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    mem_limit: 512m
+    # Yalnız gebze'ye bağımlı: Adım 1'de ankara kalkmadan da UI açılır. Ankara cluster
+    # aşağıda TANIMLI kalır -> Adım 1'de "offline" tile görünür, sync-start sonra online olur.
+    depends_on:
+      kafka-gebze:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      DYNAMIC_CONFIG_ENABLED: "true"
+      # Cluster 0 = gebze (aktif) + Debezium Connect'i
+      KAFKA_CLUSTERS_0_NAME: gebze
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-gebze:19092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium-gebze
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://debezium-gebze:8083
+      # Cluster 1 = ankara (DR) + Debezium Connect'i — sync sonrası gebze.* topic'leri burada belirir
+      KAFKA_CLUSTERS_1_NAME: ankara
+      KAFKA_CLUSTERS_1_BOOTSTRAPSERVERS: kafka-ankara:19092
+      KAFKA_CLUSTERS_1_KAFKACONNECT_0_NAME: debezium-ankara
+      KAFKA_CLUSTERS_1_KAFKACONNECT_0_ADDRESS: http://debezium-ankara:8083
+
+  adminer:
+    image: adminer:4
+    container_name: adminer
+    mem_limit: 128m
+    depends_on:
+      pg-source-gebze:
+        condition: service_healthy
+      pg-target-gebze:
+        condition: service_healthy
+    ports:
+      - "8090:8080"
+    environment:
+      # Login: System=PostgreSQL · User=postgres · Pass=postgres
+      #   pg-source-gebze/sourcedb (kaynak, inventory.customers)
+      #   pg-target-gebze/targetdb (hedef, customers_replica)  ← CDC sonrası burayı yenile
+      ADMINER_DEFAULT_SERVER: pg-target-gebze
+      ADMINER_DESIGN: dracula

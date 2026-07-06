@@ -17,12 +17,48 @@ CONNECT_B := http://localhost:8085
 CONNECT := $(CONNECT_A)
 
 .PHONY: up down clean logs ps demo verify topics-a topics-b groups-b reset \
-        cdc-register cdc-status cdc-test cdc-delete failover-check \
+        ui standby-up lsn sync-start sync-stop \
+        cdc-register cdc-register-ankara cdc-status cdc-test cdc-delete failover-check \
         failover failback active-status cdc-watch db-status db-reprovision psql-source psql-target help
 
-up:                ## Cluster'ları + MM2'yi başlat
+up:                ## 1. ADIM: Yalnız GEBZE stack + UI'lar (Ankara YOK, MM2 YOK)
 	docker compose up -d
-	@echo "Brokerlar ayağa kalkıyor... 'make ps' ile health kontrol et."
+	@echo "Gebze ayağa kalkıyor... 'make ps' ile health kontrol et."
+	@echo "NOT: Ankara HİÇ başlamadı. Akış: make cdc-register -> cdc-test -> standby-up -> sync-start."
+	@$(MAKE) --no-print-directory ui
+
+ui:                ## Gözlem UI adreslerini yazdır (Kafka UI + Adminer)
+	@echo "----------------------------------------------------------"
+	@echo " Kafka UI : http://localhost:8080   (gebze online; ankara tile Adım 3'e kadar OFFLINE)"
+	@echo " Adminer  : http://localhost:8090   (System=PostgreSQL, user/pass=postgres)"
+	@echo "            hedef kayıtlar -> Server: pg-target-gebze / DB: targetdb / tablo: customers_replica"
+	@echo "----------------------------------------------------------"
+
+standby-up:        ## 2. ADIM: Ankara DB standby'ını başlat + slot sync güvenlik kuplajını aç
+	docker compose --profile standby up -d --wait
+	@echo ">> standby healthy. synchronized_standby_slots devreye alınıyor (dbz_slot artık standby'ı bekler)"
+	@$(PSQL_S) -c "ALTER SYSTEM SET synchronized_standby_slots='standby_phys_slot'" >/dev/null 2>&1 || true
+	@$(PSQL_S) -c "SELECT pg_reload_conf()" >/dev/null 2>&1 || true
+	@echo ">>   make lsn         (primary vs standby LSN — slot sync KANITI)"
+	@echo ">>   make db-status   (dbz_slot synced=t)"
+
+lsn:               ## Slot sync'i LSN numaralarıyla göster (primary vs standby)
+	@echo "==== PRIMARY (pg-source-gebze) ===="
+	@$(PSQL_S) -tAc "SELECT 'current_wal_lsn   = '||pg_current_wal_lsn();" 2>/dev/null || echo "(primary değil?)"
+	@$(PSQL_S) -c "SELECT application_name,state,sent_lsn,replay_lsn FROM pg_stat_replication;" 2>/dev/null || true
+	@$(PSQL_S) -c "SELECT slot_name,restart_lsn,confirmed_flush_lsn,active,failover FROM pg_replication_slots WHERE slot_name='dbz_slot';" 2>/dev/null || true
+	@echo "==== STANDBY (pg-source-ankara) ===="
+	@$(PSQL_SB) -tAc "SELECT 'last_wal_replay_lsn = '||pg_last_wal_replay_lsn();" 2>/dev/null || echo "(standby ayakta değil? 'make standby-up')"
+	@$(PSQL_SB) -c "SELECT slot_name,restart_lsn,confirmed_flush_lsn,synced,active,failover FROM pg_replication_slots WHERE slot_name='dbz_slot';" 2>/dev/null || true
+	@echo ">> Standby dbz_slot.confirmed_flush_lsn, primary ile aynı hizadaysa slot SYNC (synced=t)."
+
+sync-start:        ## 3. ADIM: Ankara Kafka + Debezium + MM2 başlat (topic/offset sync)
+	docker compose --profile sync up -d
+	@echo ">> ankara Kafka + Debezium + MM2 başladı. 'make cdc-register-ankara' (ankara sink PAUSE),"
+	@echo ">> sonra 'make verify'. Kafka UI (8080): ankara ONLINE, gebze.* topic'leri + sink group offset'i."
+
+sync-stop:         ## MM2'yi durdur (CDC lokal çalışmaya devam eder)
+	docker compose stop mm2
 
 down:              ## Durdur (volume'ler kalır)
 	docker compose down
@@ -71,23 +107,26 @@ groups-b:          ## ankara consumer group offset detayları
 	$(B)/kafka-consumer-groups.sh $(BS_B) --describe --all-groups
 
 # --- Phase 2: CDC pipeline (Debezium source + JDBC sink) ---
-cdc-register:      ## İki tarafa da connector kaydet: gebze=AKTİF, ankara=PASİF (paused)
+cdc-register:      ## 1. ADIM: gebze connector'larını kaydet (source+sink, RUNNING)
 	@echo ">> gebze Connect (8084) bekleniyor..."; until curl -sf $(CONNECT_A)/ >/dev/null; do sleep 2; done
-	@echo ">> ankara Connect (8085) bekleniyor..."; until curl -sf $(CONNECT_B)/ >/dev/null; do sleep 2; done
-	@echo ">> eski connector'lar (varsa) temizleniyor (idempotent)"
-	@curl -sf -X DELETE $(CONNECT_A)/connectors/src-customers  >/dev/null 2>&1 || true
-	@curl -sf -X DELETE $(CONNECT_A)/connectors/sink-customers >/dev/null 2>&1 || true
-	@curl -sf -X DELETE $(CONNECT_B)/connectors/src-customers  >/dev/null 2>&1 || true
-	@curl -sf -X DELETE $(CONNECT_B)/connectors/sink-customers >/dev/null 2>&1 || true
+	@echo ">> eski gebze connector'ları (varsa) temizleniyor (idempotent)"
+	@curl -sf -X DELETE $(CONNECT_A)/connectors/src-customers-gebze  >/dev/null 2>&1 || true
+	@curl -sf -X DELETE $(CONNECT_A)/connectors/sink-customers-gebze >/dev/null 2>&1 || true
 	@sleep 2
 	@echo ">> [gebze] source + sink (RUNNING)"
-	@curl -sf -X POST -H "Content-Type: application/json" --data @connectors/source-postgres.json $(CONNECT_A)/connectors >/dev/null || true
-	@curl -sf -X POST -H "Content-Type: application/json" --data @connectors/sink-jdbc.json     $(CONNECT_A)/connectors >/dev/null || true
+	@curl -sf -X POST -H "Content-Type: application/json" --data @connectors/source-postgres-gebze.json $(CONNECT_A)/connectors >/dev/null || true
+	@curl -sf -X POST -H "Content-Type: application/json" --data @connectors/sink-jdbc-gebze.json    $(CONNECT_A)/connectors >/dev/null || true
+	@echo ""; echo ">> gebze CDC kaydı bitti. 'make cdc-test' ile doğrula."
+
+cdc-register-ankara: ## 3. ADIM sonrası: ankara sink'i kaydet + PAUSE (failover'a hazır)
+	@echo ">> ankara Connect (8085) bekleniyor... (önce 'make sync-start')"; until curl -sf $(CONNECT_B)/ >/dev/null; do sleep 2; done
+	@curl -sf -X DELETE $(CONNECT_B)/connectors/sink-customers-ankara >/dev/null 2>&1 || true
+	@sleep 2
 	@echo ">> [ankara] yalnız SINK kaydedilip PAUSE (source standby'da çalışamaz; failover'da kaydedilir)"
 	@curl -sf -X POST -H "Content-Type: application/json" --data @connectors/sink-jdbc-ankara.json $(CONNECT_B)/connectors >/dev/null || true
 	@sleep 2
-	@curl -sf -X PUT $(CONNECT_B)/connectors/sink-customers/pause || true
-	@echo ""; echo ">> Kayıt bitti. 'make active-status' ile durumu gör."
+	@curl -sf -X PUT $(CONNECT_B)/connectors/sink-customers-ankara/pause || true
+	@echo ""; echo ">> ankara sink PAUSED. 'make active-status' ile durumu gör."
 
 cdc-status:        ## gebze Connect connector durumları
 	@curl -sf $(CONNECT_A)/connectors?expand=status | python3 -m json.tool
@@ -118,29 +157,29 @@ failover-check:    ## Sink consumer group offset'i iki cluster'da karşılaştı
 # ankara Debezium senkron dbz_slot'tan (snapshot.mode=never) kaldığı LSN'den devam eder.
 failover:          ## gebze DÜŞTÜ: gebze PAUSE -> standby PROMOTE -> ankara source+sink başlar, yük ankara'ya
 	@echo ">> [gebze] connector'lar PAUSE"
-	@curl -sf -X PUT $(CONNECT_A)/connectors/src-customers/pause  || true
-	@curl -sf -X PUT $(CONNECT_A)/connectors/sink-customers/pause || true
+	@curl -sf -X PUT $(CONNECT_A)/connectors/src-customers-gebze/pause  || true
+	@curl -sf -X PUT $(CONNECT_A)/connectors/sink-customers-gebze/pause || true
 	@echo ">> [DB] standby (pg-source-ankara) PROMOTE ediliyor"
 	@$(PSQL_SB) -c "SELECT pg_promote(wait => true);" || true
 	@echo ">> promote sonrası dbz_slot durumu (synced->normal, active olacak):"
 	@$(PSQL_SB) -c "SELECT slot_name,synced,failover,active FROM pg_replication_slots;" || true
 	@echo ">> yük üreteci ankara'ya (artık yazılabilir)"
 	@docker compose stop loadgen-gebze >/dev/null 2>&1 || true
-	@docker compose --profile failover up -d loadgen-ankara
+	@docker compose --profile sync --profile failover up -d loadgen-ankara
 	@echo ">> [ankara] sink RESUME + source KAYDET (snapshot.mode=never -> slot'tan devam)"
-	@curl -sf -X PUT $(CONNECT_B)/connectors/sink-customers/resume || true
+	@curl -sf -X PUT $(CONNECT_B)/connectors/sink-customers-ankara/resume || true
 	@curl -sf -X POST -H "Content-Type: application/json" --data @connectors/source-postgres-ankara.json $(CONNECT_B)/connectors >/dev/null || true
 	@echo ""; echo ">> Failover tamam. 'make active-status' + 'make db-status' + 'make cdc-watch'."
 
 failback:          ## gebze GERİ GELDİ: ankara PAUSE, gebze RESUME, yük gebze'ye (DB reprovision notu)
 	@echo ">> [ankara] connector'lar PAUSE + ankara source siliniyor"
-	@curl -sf -X PUT $(CONNECT_B)/connectors/sink-customers/pause || true
-	@curl -sf -X DELETE $(CONNECT_B)/connectors/src-customers >/dev/null 2>&1 || true
+	@curl -sf -X PUT $(CONNECT_B)/connectors/sink-customers-ankara/pause || true
+	@curl -sf -X DELETE $(CONNECT_B)/connectors/src-customers-ankara >/dev/null 2>&1 || true
 	@docker compose stop loadgen-ankara >/dev/null 2>&1 || true
 	@echo ">> [gebze] connector'lar RESUME, yük gebze'ye"
 	@docker compose up -d loadgen-gebze
-	@curl -sf -X PUT $(CONNECT_A)/connectors/sink-customers/resume || true
-	@curl -sf -X PUT $(CONNECT_A)/connectors/src-customers/resume  || true
+	@curl -sf -X PUT $(CONNECT_A)/connectors/sink-customers-gebze/resume || true
+	@curl -sf -X PUT $(CONNECT_A)/connectors/src-customers-gebze/resume  || true
 	@echo ""
 	@echo ">> NOT: failover'da pg-source-ankara promote edildiyse iki taraf ayrıştı (split timeline)."
 	@echo ">>      DB'yi yeniden senkronlamak için (Patroni'nin otomatik yaptığı pg_rewind):"
@@ -158,12 +197,12 @@ db-status:         ## Streaming replication + slot sync durumu (primary & standb
 
 db-reprovision:    ## pg-source-ankara'yi sıfırdan standby olarak yeniden kur (failback sonrası DB re-sync)
 	@echo ">> ankara connector'ları + loadgen-ankara durduruluyor"
-	@curl -sf -X DELETE $(CONNECT_B)/connectors/src-customers  >/dev/null 2>&1 || true
-	@curl -sf -X PUT    $(CONNECT_B)/connectors/sink-customers/pause >/dev/null 2>&1 || true
+	@curl -sf -X DELETE $(CONNECT_B)/connectors/src-customers-ankara  >/dev/null 2>&1 || true
+	@curl -sf -X PUT    $(CONNECT_B)/connectors/sink-customers-ankara/pause >/dev/null 2>&1 || true
 	@docker compose stop loadgen-ankara >/dev/null 2>&1 || true
 	@echo ">> pg-source-ankara siliniyor ve standby olarak yeniden kuruluyor (pg_basebackup)"
 	@docker compose rm -v -sf pg-source-ankara >/dev/null 2>&1 || true
-	@docker compose up -d pg-source-ankara
+	@docker compose --profile sync up -d pg-source-ankara
 	@echo ">> 'make db-status' ile standby tekrar senkron mu kontrol et."
 
 active-status:     ## İki tarafın connector durumu + hangi loadgen çalışıyor
@@ -189,4 +228,4 @@ psql-target:       ## pg-target-gebze'a interaktif psql
 	docker compose exec pg-target-gebze psql -U postgres -d targetdb
 
 help:              ## Bu yardım
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'

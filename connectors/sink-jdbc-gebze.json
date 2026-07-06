@@ -1,9 +1,10 @@
 {
-  "name": "sink-customers",
+  "name": "sink-customers-gebze",
   "config": {
     "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
     "tasks.max": "1",
-    "topics.regex": "(ankara\\.)?dbz\\.inventory\\.customers",
+    "topics": "dbz.inventory.customers,ankara.dbz.inventory.customers",
+    "consumer.override.group.id": "connect-sink-customers",
     "connection.url": "jdbc:postgresql://pg-target-gebze:5432/targetdb",
     "connection.username": "postgres",
     "connection.password": "postgres",
