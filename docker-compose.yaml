@@ -49,10 +49,9 @@ services:
   kafka-ankara:
     # kafka-gebze ile birebir aynı yapı (env açıklamaları için yukarıya bak); farklar:
     # CLUSTER_ID, quorum voter hostu (kafka-ankara) ve HOST advertised portu (9094).
-    # 3. ADIM (sync): Ankara Kafka 'make sync-start' ile kalkar.
+    # 'make up' ile açılır (active-standby ortam); MM2 driver'ları hariç.
     <<: *kafka-common
     container_name: kafka-ankara
-    profiles: ["sync"]
     ports:
       - "9094:9092"
     environment:
@@ -71,14 +70,16 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
 
-  mm2:
+  # ---------- MM2 driver'ları: her yön AYRI (remote consume, local produce) ----------
+  # İkisi de 'mm2' profilinde -> 'make up' ile başlamaz. Ayrı ayrı açılır:
+  #   make mm2-ankara-up  (gebze -> ankara, failover hazırlığı)
+  #   make mm2-gebze-up   (ankara -> gebze, failback hazırlığı)
+
+  mm2-ankara:
     image: apache/kafka:3.9.1
     container_name: mm2-ankara
     mem_limit: 768m
-    # 2 ADIMLI DEMO: MM2 varsayılan 'make up' ile başlamaz. Önce gebze'de CDC lokal
-    # çalıştırılır, sonra 'make sync-start' (docker compose --profile sync up -d mm2)
-    # ile cross-DC replikasyon açılır.
-    profiles: ["sync"]
+    profiles: ["mm2"]
     environment:
       KAFKA_HEAP_OPTS: "-Xmx384m -Xms128m"
     depends_on:
@@ -87,7 +88,24 @@ services:
       kafka-ankara:
         condition: service_healthy
     volumes:
-      - ./mm2.properties:/opt/kafka/config/mm2.properties:ro
+      - ./mm2-ankara.properties:/opt/kafka/config/mm2.properties:ro
+    entrypoint: ["/opt/kafka/bin/connect-mirror-maker.sh"]
+    command: ["/opt/kafka/config/mm2.properties"]
+
+  mm2-gebze:
+    image: apache/kafka:3.9.1
+    container_name: mm2-gebze
+    mem_limit: 768m
+    profiles: ["mm2"]
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx384m -Xms128m"
+    depends_on:
+      kafka-gebze:
+        condition: service_healthy
+      kafka-ankara:
+        condition: service_healthy
+    volumes:
+      - ./mm2-gebze.properties:/opt/kafka/config/mm2.properties:ro
     entrypoint: ["/opt/kafka/bin/connect-mirror-maker.sh"]
     command: ["/opt/kafka/config/mm2.properties"]
 
@@ -108,10 +126,12 @@ services:
       - "max_replication_slots=10"
       - "-c"
       - "hot_standby=on"
-      # NOT: synchronized_standby_slots BAŞLANGIÇTA AÇIK DEĞİL. Açık olsaydı Debezium logical
-      # slot'u (dbz_slot), fiziksel standby (Ankara) aktif olana dek BLOKE olur -> Adım 1'de
-      # gebze CDC hiç akmaz. Bu yüzden 3-adımlı akışta 'make standby-up' (Adım 2) standby'ı
-      # kaldırdıktan sonra bu ayarı ALTER SYSTEM ile devreye alır.
+      - "-c"
+      # Ankara standby 'make up' ile birlikte açık olduğu için bu güvenlik kuplajı baştan statik:
+      # dbz_slot (logical) fiziksel standby'ın (standby_phys_slot) flush'ından öteye ilerleyemez
+      # -> failover slot'u her zaman güvenli. (Connector 'make cdc-register' ile sonradan açıldığı
+      # için başlangıçta blokaj yaşanmaz; o an standby zaten bağlı olur.)
+      - "synchronized_standby_slots=standby_phys_slot"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -122,6 +142,10 @@ services:
     volumes:
       - ./pg-hba-init.sh:/docker-entrypoint-initdb.d/00-pg-hba.sh:ro
       - ./sql/primary-init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+      # Named volume: 'make reprovision-gebze' PGDATA'yı ankara'dan basebackup ile doldurup
+      # (docker compose run) sonra 'up' ile aynı volume'de başlatabilsin diye adlandırıldı.
+      - ./reprovision-gebze.sh:/reprovision-gebze.sh:ro
+      - pgdata-gebze:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d sourcedb"]
       interval: 5s
@@ -184,13 +208,8 @@ services:
     image: postgres:17
     container_name: pg-source-ankara
     mem_limit: 512m
-    # 2. ADIM (standby): 'make standby-up' ile kalkar; pg-source-gebze'un streaming
-    # standby'ı olur ve failover slot'unu (dbz_slot) senkron alır -> 'make lsn' ile kanıt.
-    # 'sync' profilinde de var ki 'make sync-start' tek başına da ayağa kaldırabilsin.
-    profiles: ["standby", "sync"]
-    depends_on:
-      pg-source-gebze:
-        condition: service_healthy
+    # 'make up' ile kalkar: pg-source-gebze'un canlı streaming standby'ı olur ve failover
+    # slot'unu (dbz_slot) senkron alır -> 'make lsn' / 'make dr-status' ile kanıt.
     environment:
       PGDATA: /var/lib/postgresql/data
       PRIMARY_HOST: pg-source-gebze
@@ -210,7 +229,6 @@ services:
     image: postgres:16
     container_name: pg-target-ankara
     mem_limit: 512m
-    profiles: ["sync"]   # 3. ADIM: ankara sink hedefi, 'make sync-start' ile kalkar
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -227,7 +245,6 @@ services:
     image: quay.io/debezium/connect:3.0.0.Final
     container_name: debezium-ankara
     mem_limit: 1g
-    profiles: ["sync"]   # 3. ADIM: ankara Connect, 'make sync-start' ile kalkar
     depends_on:
       kafka-ankara:
         condition: service_healthy
@@ -309,8 +326,8 @@ services:
     image: provectuslabs/kafka-ui:v0.7.2
     container_name: kafka-ui
     mem_limit: 512m
-    # Yalnız gebze'ye bağımlı: Adım 1'de ankara kalkmadan da UI açılır. Ankara cluster
-    # aşağıda TANIMLI kalır -> Adım 1'de "offline" tile görünür, sync-start sonra online olur.
+    # Yalnız gebze'ye bağımlı (health-race olmasın); ankara cluster da aşağıda TANIMLI.
+    # 'make up' ile ankara da açıldığı için iki cluster tile'ı da ONLINE görünür.
     depends_on:
       kafka-gebze:
         condition: service_healthy
@@ -346,3 +363,7 @@ services:
       #   pg-target-gebze/targetdb (hedef, customers_replica)  ← CDC sonrası burayı yenile
       ADMINER_DEFAULT_SERVER: pg-target-gebze
       ADMINER_DESIGN: dracula
+
+volumes:
+  # pg-source-gebze PGDATA: 'make reprovision-gebze' için named (docker compose run + up aynı volume).
+  pgdata-gebze:

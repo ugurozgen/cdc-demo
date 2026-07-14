@@ -92,7 +92,7 @@ make up            # gebze stack + UI'lar
 make ps            # health bekle
 # Tarayıcı: Kafka UI http://localhost:8080 (ankara tile OFFLINE) · Adminer http://localhost:8090
 make cdc-register  # gebze source+sink (RUNNING)
-make cdc-test      # gebze CDC lokal: pg-source-gebze -> kafka-gebze -> pg-target-gebze
+make cdc-insert      # gebze CDC lokal: pg-source-gebze -> kafka-gebze -> pg-target-gebze
                    #   Adminer'da customers_replica'yı YENİLE · Kafka UI mesajında source.lsn'i gör
 
 # Adım 2 — Ankara DB standby'ı: slot sync'i LSN NUMARASI ile kanıtla
@@ -119,7 +119,7 @@ make clean         # durdur + tüm veriyi sil
 ```
 
 `make help` tüm hedefleri listeler. **Tipik tam döngü:**
-`up` → `cdc-register` → `cdc-test` → `standby-up` → `lsn` → `sync-start` → `cdc-register-ankara` → `verify` → `failover` → `failback` → `db-reprovision`.
+`up` → `cdc-register` → `cdc-insert` → `standby-up` → `lsn` → `sync-start` → `cdc-register-ankara` → `verify` → `failover` → `failback` → `db-reprovision`.
 
 ### Tarayıcıdan gözlem (adım adım)
 
@@ -127,7 +127,7 @@ make clean         # durdur + tüm veriyi sil
 
 | Adım | Kafka UI (`:8080`) | Adminer (`:8090`) |
 |------|--------------------|-------------------|
-| **1 — Gebze CDC** | `gebze` cluster ONLINE; `dbz.inventory.customers` topic'i büyür → **Messages**'ta payload'daki **`source.lsn`**'i gör. `ankara` tile **OFFLINE**. | `pg-target-gebze`/`targetdb` → `customers_replica`: `cdc-test`/`loadgen` akarken **Refresh** → satırlar artar. Kaynak: `pg-source-gebze`/`sourcedb`. |
+| **1 — Gebze CDC** | `gebze` cluster ONLINE; `dbz.inventory.customers` topic'i büyür → **Messages**'ta payload'daki **`source.lsn`**'i gör. `ankara` tile **OFFLINE**. | `pg-target-gebze`/`targetdb` → `customers_replica`: `cdc-insert`/`loadgen` akarken **Refresh** → satırlar artar. Kaynak: `pg-source-gebze`/`sourcedb`. |
 | **2 — Standby slot sync** | (değişiklik yok) | `pg-source-ankara`/`sourcedb`'a bağlan; `make lsn`/`make db-status` LSN'leri gösterir — standby `dbz_slot.confirmed_flush_lsn` primary ile aynı hizada. |
 | **3 — MM2 sync** | `ankara` tile **ONLINE**; **Topics**'te `gebze.demo` + `gebze.dbz.inventory.customers` mirror'ları belirir; **Consumers**'ta `connect-sink-customers` offset'i ankara'ya çevrilmiş görünür. | `pg-target-ankara` de artık bağlanabilir (failover'da sink buraya yazar). |
 
